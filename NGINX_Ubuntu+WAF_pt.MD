@@ -1,9 +1,3 @@
-Excelente\! Esta é uma tarefa abrangente e muito relevante para ambientes de produção modernos. Como especialista em administração de sistemas Linux, NGINX e segurança, preparei um guia detalhado e completo para atender a todos os seus requisitos.
-
-Vamos construir um cluster de Application Gateway robusto, seguro e de alta disponibilidade no Ubuntu 24.04 LTS.
-
------
-
 ### **Guia Completo: Cluster NGINX com Keepalived como Application Gateway L7 no Ubuntu 24.04 LTS**
 
 Este guia detalha a criação de um cluster de dois nós (ativo-passivo) usando NGINX e Keepalived. Ele funcionará como um gateway de aplicação Layer 7, distribuindo tráfego para múltiplos serviços de backend, com foco em segurança, alta disponibilidade e escalabilidade.
