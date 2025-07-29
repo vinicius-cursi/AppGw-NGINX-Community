@@ -1,19 +1,17 @@
-# Configuração de Cluster NGINX HA com Balanceamento e Status
+# Configuração de Cluster NGINX HA com Balanceamento Avançado
 
-Este documento detalha a configuração completa para um cluster de NGINX em Alta Disponibilidade (HA) no modelo Ativo/Passivo, utilizando **Keepalived** para failover automático e o módulo **Stub Status** para monitoramento básico.
+Este documento detalha a configuração completa para um cluster de NGINX em Alta Disponibilidade (HA) no modelo Ativo/Passivo, utilizando **Keepalived** para failover automático.
 
-A configuração inclui:
-* **Alta Disponibilidade**: Failover automático entre dois servidores NGINX.
-* **Persistência de Sessão**: Mantém o usuário no mesmo servidor backend.
-* **Balanceamento por Peso**: Prioriza aplicações mais críticas.
-* **Health Checks Passivos**: Remove e reintegra backends com falha automaticamente.
-* **Página de Status**: Uma interface simples para monitorar a saúde do NGINX.
+A configuração inclui regras avançadas de balanceamento de carga:
+* **Persistência de Sessão**: Garante que um usuário seja direcionado sempre para o mesmo servidor backend.
+* **Balanceamento por Peso**: Distribui mais tráfego para os servidores das aplicações mais críticas.
+* **Health Checks Passivos**: Remove automaticamente um servidor do balanceamento após 5 falhas de conexão e o adiciona de volta quando o serviço se normaliza.
 
 ---
 
 ## Diagrama da Arquitetura
 
-O diagrama foi atualizado para incluir o acesso restrito do administrador à página de status.
+O diagrama abaixo ilustra o fluxo de tráfego, desde o cliente até as aplicações backend, passando pelo cluster NGINX HA.
 
 ```mermaid
 graph TD
@@ -55,19 +53,26 @@ graph TD
     NGINX1 -- proxy_pass (/app04) --> C4
     NGINX1 -- proxy_pass (/app05) --> C5
     NGINX1 -- proxy_pass (/lbprobe) --> C6
-```
+````
 
----
+-----
 
 ## Passo 1: Configuração do NGINX
-
-Este arquivo deve ser **idêntico em ambos os servidores NGINX**. A principal mudança é a adição de um novo bloco `location /nginx_status`.
+Este arquivo deve ser **idêntico em ambos os servidores NGINX** (NGINX-01 e NGINX-02). Ele contém a lógica de roteamento, balanceamento e os health checks passivos.
 
 **Arquivo:** `/etc/nginx/conf.d/mydomain.conf`
 
 ```nginx
 # --- Upstreams (Pools de Servidores Backend) ---
-# ... (Nenhuma alteração nos blocos upstream. Eles permanecem os mesmos da versão anterior) ...
+#
+# Diretivas utilizadas:
+# least_conn: Envia novas requisições para o servidor com o menor número de conexões ativas.
+# sticky cookie: Garante que um cliente permaneça no mesmo servidor durante sua sessão (requer módulo extra).
+# max_fails=5: Marca um servidor como indisponível após 5 tentativas de conexão falhas.
+# fail_timeout=30s: Após ser marcado como indisponível, o NGINX não tentará se conectar a ele por 30 segundos.
+#                   Depois desse tempo, ele volta a receber tráfego gradualmente.
+# weight: Define a prioridade de tráfego para cada aplicação.
+
 upstream app01_backend {
     least_conn;
     sticky cookie srv_id expires=1h domain=.mydomain.com path=/app01/;
@@ -122,18 +127,16 @@ upstream lbprobe_backend {
 }
 
 # --- Bloco do Servidor ---
-
 server {
     listen 80;
-    server_name [www.mydomain.com](https://www.mydomain.com);
+    server_name www.mydomain.com;
     return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl http2;
-    server_name [www.mydomain.com](https://www.mydomain.com);
+    server_name www.mydomain.com;
 
-    # ... (Configurações SSL e Headers permanecem as mesmas) ...
     ssl_certificate /etc/nginx/ssl/mydomain.pem;
     ssl_certificate_key /etc/nginx/ssl/mydomain.pem;
     ssl_password_file /etc/nginx/ssl/ssl_pass.txt;
@@ -153,48 +156,136 @@ server {
     location /app05/ { proxy_pass http://app05_backend; }
     location /lbprobe/ { proxy_pass http://lbprobe_backend; }
 
-    # --- [NOVO] Bloco para a Página de Status ---
+    # --- Bloco para a Página de Status ---
     location /nginx_status {
-        stub_status; # Ativa a página de status
-        allow 10.0.0.0/8;      # Permite acesso da sua rede interna/VPN
-        allow 192.168.0.5;     # Permite acesso de um IP de admin específico
-        deny all;              # Bloqueia todos os outros acessos
+        stub_status;
+        allow 10.0.0.0/8;
+        allow 192.168.0.5;
+        deny all;
     }
 }
 ```
 
-### O que a Página de Status Exibe?
-
-Ao acessar `https://www.mydomain.com/nginx_status` de um IP permitido, você verá algo como:
-
-```
-Active connections: 291
-server accepts handled requests
- 16630948 16630948 31070465
-Reading: 6 Writing: 179 Waiting: 106
-```
-
-* **Active connections**: O número total de conexões ativas.
-* **accepts**: Total de conexões aceitas.
-* **handled**: Total de conexões gerenciadas (geralmente igual a `accepts`).
-* **requests**: Total de requisições de clientes.
-* **Reading**: Conexões onde o NGINX está lendo o cabeçalho da requisição.
-* **Writing**: Conexões onde o NGINX está escrevendo a resposta de volta para o cliente.
-* **Waiting**: Conexões inativas aguardando uma nova requisição (keep-alive).
-
----
+-----
 
 ## Passo 2: Configuração do Keepalived para HA
 
-A configuração do Keepalived **não precisa de nenhuma alteração**. Ela continua a mesma, pois sua função é apenas verificar se o processo do NGINX está de pé e gerenciar o IP Virtual.
+Instale o Keepalived em ambos os servidores NGINX (`sudo apt install keepalived` ou `sudo yum install keepalived`).
 
-* Script `/etc/keepalived/check_nginx.sh` (em ambos os servidores)
-* Arquivo `/etc/keepalived/keepalived.conf` (versões MASTER e BACKUP)
+#### **1. Script de Verificação do NGINX**
 
-Ambos permanecem exatamente como na documentação anterior.
+Crie este script em **ambos os servidores**. O Keepalived o usará para garantir que o processo do NGINX está ativo. Se não estiver, ele iniciará o failover.
 
----
+Este conteúdo deve ser salvo no arquivo `/etc/keepalived/check_nginx.sh` em **ambos** os servidores. Depois, torne-o executável com `sudo chmod +x /etc/keepalived/check_nginx.sh`.
 
-## Conclusão
+```bash
+#!/bin/bash
+# Verifica se o processo do NGINX existe
+if pgrep nginx > /dev/null; then
+    exit 0 # Sucesso, NGINX está rodando
+else
+    exit 1 # Falha, NGINX não está rodando
+fi
+```
 
-Com esta adição, você não tem um "manager" completo, mas ganha uma ferramenta de diagnóstico vital e de baixo custo. Para monitoramento mais avançado com NGINX Community, o próximo passo seria usar uma ferramenta externa (como Zabbix, Prometheus ou Datadog) que colete os dados dessa página `/nginx_status` e os exiba em gráficos históricos.
+Torne o script executável: `sudo chmod +x /etc/keepalived/check_nginx.sh`
+
+-----
+
+### **2. Configuração do Keepalived - Servidor NGINX-01 (MASTER)**
+
+Este conteúdo deve ser salvo no arquivo `/etc/keepalived/keepalived.conf` apenas no **servidor NGINX-01 (MASTER)**.
+
+**Arquivo:** `/etc/keepalived/keepalived.conf`
+
+```nginx
+# Bloco global
+global_defs {
+   router_id NGINX_MASTER
+}
+
+# Script para monitorar o NGINX
+vrrp_script check_nginx {
+    script "/etc/keepalived/check_nginx.sh"
+    interval 2  # Executar a cada 2 segundos
+    weight 50   # Adicionar 50 à prioridade se o script for bem-sucedido
+}
+
+# Instância VRRP para gerenciar o IP Virtual
+vrrp_instance VI_1 {
+    state MASTER                # Este é o servidor PRIMÁRIO
+    interface ens160            # IMPORTANTE: Altere para sua interface de rede (ex: eth0)
+    virtual_router_id 51        # Deve ser o mesmo em ambos os servidores
+    priority 150                # A prioridade mais alta se torna MASTER
+
+    advert_int 1                # Anúncios VRRP a cada 1 segundo
+
+    authentication {
+        auth_type PASS
+        auth_pass sua_senha_secreta # Altere e use a mesma senha nos dois servidores
+    }
+
+    # O IP Virtual (VIP) que será compartilhado
+    virtual_ipaddress {
+        192.168.1.10/24         # IMPORTANTE: Altere para o VIP desejado
+    }
+
+    # Associar o script de monitoramento
+    track_script {
+        check_nginx
+    }
+}
+```
+
+-----
+
+### **3. Configuração do Keepalived - Servidor NGINX-02 (BACKUP)**
+
+Este conteúdo deve ser salvo no arquivo `/etc/keepalived/keepalived.conf` apenas no **servidor NGINX-02 (BACKUP)**.
+
+**Arquivo:** `/etc/keepalived/keepalived.conf`
+
+```nginx
+# Bloco global
+global_defs {
+   router_id NGINX_BACKUP
+}
+
+# Script para monitorar o NGINX (idêntico ao MASTER)
+vrrp_script check_nginx {
+    script "/etc/keepalived/check_nginx.sh"
+    interval 2
+    weight 50
+}
+
+# Instância VRRP para gerenciar o IP Virtual
+vrrp_instance VI_1 {
+    state BACKUP                # Este é o servidor SECUNDÁRIO
+    interface ens160            # IMPORTANTE: Deve ser a mesma interface do MASTER
+    virtual_router_id 51        # Deve ser o mesmo do MASTER
+    priority 100                # Prioridade menor o torna um BACKUP
+
+    advert_int 1
+
+    authentication {
+        auth_type PASS
+        auth_pass sua_senha_secreta # Deve ser a mesma senha do MASTER
+    }
+
+    # O mesmo IP Virtual do MASTER
+    virtual_ipaddress {
+        192.168.1.10/24
+    }
+
+    track_script {
+        check_nginx
+    }
+}
+```
+
+Após criar os arquivos, inicie e habilite o serviço Keepalived em ambos os servidores:
+
+```bash
+sudo systemctl start keepalived
+sudo systemctl enable keepalived
+```
